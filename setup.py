@@ -8,7 +8,6 @@ setup(name="physika",
     install_requires=[
         "torch",
         "ply",
-        "numpy"
     ],
     packages=find_packages(),
     project_urls={
