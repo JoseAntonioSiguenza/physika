@@ -224,7 +224,7 @@ def replace_class_params(code: str, class_params: list[tuple[str, ASTNode]]) -> 
         code = re.sub(rf'\(({cp_name})\s', r'(self.\1 ', code)
         code = re.sub(rf'\s({cp_name})\)', r' self.\1)', code)
         code = re.sub(rf'\(({cp_name})\)', r'(self.\1)', code)
-        # Catch-all: any remaining bare word reference not already prefixed
+        # Catch remaining word references not already prefixed 
         code = re.sub(rf'(?<!self\.)\b{cp_name}\b', f'self.{cp_name}', code)
     return code
 
