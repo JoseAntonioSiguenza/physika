@@ -1,18 +1,9 @@
 import ply.yacc as yacc
 from lexer import tokens # noqa: F401
-# from utils.ast_utils import ASTNode # noqa: F401
 from utils.parser_utils import find_indexed_arrays
 
 symbol_table: dict[str, dict] = {}
 print_separator: bool = False
-# parsing_function_body: bool = False
-#Commented for now, until enabling printing of unified AST in execute.py
-# Collect all statements as AST, evaluate after parsing
-# program_ast: list[ASTNode] = []  # List of AST statements
-# AST_MODE: bool = True   # When True, build AST instead of immediate evaluation
-
-# # Flag to enable AST printing (set via --ast flag)
-# PRINT_AST: bool = False
 
 
 # PARSER
@@ -134,6 +125,41 @@ def p_statement_function_with_body(p):
     symbol_table[name] = {"type": "function", "value": func_def}
     p[0] = ("func_def", name)
 
+def p_statement_function_body_only(p):
+    """statement : DEF ID LPAREN params RPAREN COLON type_spec COLON NEWLINE INDENT func_body_stmts DEDENT"""
+    # Function with return statements that live inside if/else branches.
+    # Used when every code path ends with a return inside a conditional
+    # Example:
+    #   def f(x: ℝ) : ℝ:
+    #       if x > 0:
+    #           return x
+    #       else:
+    #           return -x
+
+    # Parameters:
+    # p[2]  — function name (ID)
+    # p[4]  — parameter list [(name, type)]
+    # p[7]  — return type
+    # p[11] — list of func_body_stmt nodes (body_assign, body_if_else_return, etc.)
+    # Returns:
+    #  ("func_def", name) + symbol_table entry
+
+    name = p[2]
+    params = p[4]
+    return_type = p[7]
+    body_stmts = p[11]
+
+    func_def = {
+        "params": params,
+        "return_type": return_type,
+        "body": None,  # No final return expression; returns are inside body stmts
+        "has_loop": False,
+        "statements": body_stmts
+    }
+
+    symbol_table[name] = {"type": "function", "value": func_def}
+    p[0] = ("func_def", name)
+
 def p_func_body_stmts_single(p):
     """func_body_stmts : func_body_stmt"""
     p[0] = [p[1]] if p[1] else []
@@ -165,6 +191,119 @@ def p_func_body_stmt_tuple_unpack_three(p):
 def p_func_body_stmt_empty(p):
     """func_body_stmt : NEWLINE"""
     p[0] = None
+
+def p_func_body_stmt_if_return(p):
+    """func_body_stmt : IF condition COLON NEWLINE INDENT RETURN func_expr NEWLINE DEDENT"""
+    # Early-return, no else branch. 
+    # if cond:
+    #   return expr
+
+    # Parameters:
+    # p[2]  — condition node (cond_gt, cond_lt, …)
+    # p[7]  — return expression
+    # Returns:
+    #  ("body_if_return", cond, return_expr)
+    p[0] = ("body_if_return", p[2], p[7])
+
+def p_func_body_stmt_if_else_return(p):
+    """func_body_stmt : IF condition COLON NEWLINE INDENT RETURN func_expr NEWLINE DEDENT ELSE COLON NEWLINE INDENT RETURN func_expr NEWLINE DEDENT"""
+    # Both branches return immediately.
+
+    # Parameters:
+    # p[2]  — condition node
+    # p[7]  — then-branch return expression
+    # p[15] — else-branch return expression
+    # Returns:
+    #  ("body_if_else_return", cond, then_expr, else_expr)
+    p[0] = ("body_if_else_return", p[2], p[7], p[15])
+
+def p_func_body_stmt_if_else(p):
+    """func_body_stmt : IF condition COLON NEWLINE INDENT func_body_stmts DEDENT ELSE COLON NEWLINE INDENT func_body_stmts DEDENT"""
+    # if/else block with statements in both branches.
+    # Used when branches assign to a variable and the return is at the end of the function
+    # Example:
+    #   if x > 0:
+    #       y = x * x
+    #   else:
+    #       y = -x
+
+    # Parameters:
+    # p[2]  — condition node
+    # p[6]  — then-branch statement list
+    # p[12] — else-branch statement list
+    # Returns:
+    #  ("body_if_else", cond, then_stmts, else_stmts)
+    p[0] = ("body_if_else", p[2], p[6], p[12])
+
+def p_func_body_stmt_if_only(p):
+    """func_body_stmt : IF condition COLON NEWLINE INDENT func_body_stmts DEDENT"""
+    # One-sided conditional: executes then_stmts only when cond is True.
+    # Example:
+    #   if y < -1:
+    #       y = -1
+    # Parameters:
+    # p[2] — condition node
+    # p[6] — then-branch statement list
+    # Returns:
+    #  ("body_if", cond, then_stmts)
+    p[0] = ("body_if", p[2], p[6])
+
+# Conditions:
+#   Boolean comparisons between two func_expr values.
+#   Each rule produces a 3-tuple: (tag, left_expr, right_expr).
+#   condition_to_expr() in ast_utils.py converts these to Python operator strings.
+
+# Parameters:
+#   p[1] — left-hand expression
+#   p[3] — right-hand expression.
+
+def p_condition_eq(p):
+    """condition : func_expr EQEQ func_expr"""
+    # Example:
+    # left == right
+    # Returns:
+    #   ("cond_eq", left, right)
+    p[0] = ("cond_eq", p[1], p[3])
+
+def p_condition_neq(p):
+    """condition : func_expr NEQ func_expr"""
+    # Example:
+    # left != right
+    # Returns:
+    #   ("cond_neq", left, right)
+    p[0] = ("cond_neq", p[1], p[3])
+
+def p_condition_lt(p):
+    """condition : func_expr LT func_expr"""
+    # Example:
+    # left < right
+    # Returns:
+    #   ("cond_lt", left, right)
+    p[0] = ("cond_lt", p[1], p[3])
+
+def p_condition_gt(p):
+    """condition : func_expr GT func_expr"""
+    # Example:
+    # left > right
+    # Returns:
+    #   ("cond_gt", left, right)
+    p[0] = ("cond_gt", p[1], p[3])
+
+def p_condition_leq(p):
+    """condition : func_expr LEQ func_expr"""
+    # Example:
+    # left <= right
+    # Returns:
+    #   ("cond_leq", left, right)
+    p[0] = ("cond_leq", p[1], p[3])
+
+def p_condition_geq(p):
+    """condition : func_expr GEQ func_expr"""
+    # Example:
+    # left >= right
+    # Returns:
+    #   ("cond_geq", left, right)
+    p[0] = ("cond_geq", p[1], p[3])
 
 def p_statement_function_with_loop(p):
     """statement : DEF ID LPAREN params RPAREN COLON type_spec COLON NEWLINE INDENT func_init FOR ID COLON NEWLINE INDENT func_loop_body DEDENT NEWLINE RETURN func_expr DEDENT"""
@@ -516,7 +655,8 @@ def p_lambda_loop_stmt_empty(p):
     p[0] = None
 
 def p_statement_decl(p):
-    """statement : ID COLON type_spec EQUALS expr"""
+    """statement : ID COLON type_spec EQUALS expr NEWLINE"""
+    # NEWLINE forces to parse the full expression on one line before reducing the statement.
     name = p[1]
     type_spec = p[3]
     expr_ast = p[5]  # This is now an AST, not an evaluated value
@@ -546,6 +686,16 @@ def p_statement_empty(p):
     if p[1] >= 2:
         print_separator = True
     p[0] = None
+
+def p_statement_if_else(p):
+    """statement : IF condition COLON NEWLINE INDENT for_body DEDENT ELSE COLON NEWLINE INDENT for_body DEDENT"""
+    # Program-level if/else (body uses for_statement rules)
+    p[0] = ("if_else", p[2], p[6], p[12])
+
+def p_statement_if_only(p):
+    """statement : IF condition COLON NEWLINE INDENT for_body DEDENT"""
+    # Program-level if without else
+    p[0] = ("if_only", p[2], p[6])
 
 def p_statement_for(p):
     """statement : FOR ID COLON NEWLINE INDENT for_body DEDENT"""
@@ -616,21 +766,33 @@ def p_func_expr_term(p):
     p[0] = p[1]
 
 def p_func_term_times(p):
-    """func_term : func_term TIMES func_factor
-                 | func_term DIVIDE func_factor
-                 | func_term MATMUL func_factor
-                 | func_term POWER func_factor"""
+    """func_term : func_term TIMES func_power
+                 | func_term DIVIDE func_power
+                 | func_term INTDIV func_power
+                 | func_term MATMUL func_power"""
     if p[2] == "*":
         p[0] = ("mul", p[1], p[3])
     elif p[2] == "/":
         p[0] = ("div", p[1], p[3])
-    elif p[2] == "**":
-        p[0] = ("pow", p[1], p[3])
+    elif p[2] == "//":
+        p[0] = ("intdiv", p[1], p[3])
     else:  # @
         p[0] = ("matmul", p[1], p[3])
 
-def p_func_term_factor(p):
-    """func_term : func_factor"""
+def p_func_term_power(p):
+    """func_term : func_power"""
+    p[0] = p[1]
+
+def p_func_power_pow(p):
+    """func_power : func_factor POWER func_power"""
+    p[0] = ("pow", p[1], p[3])
+
+def p_func_power_neg(p):
+    """func_power : MINUS func_power"""
+    p[0] = ("neg", p[2])
+
+def p_func_power_factor(p):
+    """func_power : func_factor"""
     p[0] = p[1]
 
 def p_func_factor_number(p):
@@ -658,6 +820,11 @@ def p_func_factor_call_index(p):
     """func_factor : ID LPAREN func_args RPAREN LBRACKET func_expr RBRACKET"""
     # Indexing a function call result: grad(H, x)[0]
     p[0] = ("call_index", p[1], p[3], p[6])
+
+def p_func_factor_step_slice(p):
+    """func_factor : ID LBRACKET NUMBER COLON COLON NUMBER RBRACKET"""
+    # Step slice: x[0::2]  (start::step, no stop)
+    p[0] = ("step_slice", p[1], int(p[3]), int(p[6]))
 
 def p_func_factor_array(p):
     """func_factor : LBRACKET func_elements RBRACKET"""
